@@ -1,0 +1,162 @@
+; docformat = 'rst'
+
+;+
+; `HM_MAKE_RT` can build a cross-platform runtime distribution.
+;
+; :Todo:
+;    fix also for the linux distribution (is it necessary?)
+;
+; :Author:
+;    Helder Marchetto
+;-
+
+
+;+
+; Wrapper for `MAKE_RT`. `HM_MAKE_RT` is designed to make a *.exe app that 
+; will automatically start as 64-bit if available, 32-bit otherwise. The 
+; params/keywords are *IDENTICAL* to `MAKE_RT`, except for the following: 
+;  
+;    useImageFile : in, optional, type=string
+;       set to define an image file (bmp) to be used in the splash screen
+;
+; :Requires:
+;    IDL 8.2.3
+;-
+
+;+
+;******************************************************************************************;
+;                                                                                          ;
+;  Copyright (c) 2017, by Helder Marchetto. All rights reserved.                           ;
+;                                                                                          ;
+;  Redistribution and use in source and binary forms, with or without                      ;
+;  modification, are permitted provided that the following conditions are met:             ;
+;                                                                                          ;
+;      * Redistributions of source code must retain the above copyright                    ;
+;        notice, this list of conditions and the following disclaimer.                     ;
+;      * Redistributions in binary form must reproduce the above copyright                 ;
+;        notice, this list of conditions and the following disclaimer in the               ;
+;        documentation and/or other materials provided with the distribution.              ;
+;      * The author's name may not be used to endorse or promote products derived          ;
+;        from this software without specific prior written permission.                     ;
+;                                                                                          ;
+;  THIS SOFTWARE IS PROVIDED BY HELDER MARCHETTO ''AS IS'' AND ANY EXPRESS OR IMPLIED      ;
+;  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY    ;
+;  AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL BRAD GOM BE      ;
+;  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL       ;
+;  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;    ;
+;  LOSS OF USE, DATA, OR PROFITS; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) ;
+;  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,   ;
+;  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS   ;
+;  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.                            ;
+;******************************************************************************************;
+;-
+
+pro hm_make_rt, appname, outdir, $
+                idldir=idldir, logfile=logfile, manifest=manifest, $
+                overwrite=overwrite, savefile=savefile, $
+                vm=vm, embedded=embedded, dataminer=dataminer, $
+                dicomex=dicomex, hires_maps=hires_maps, $
+                win32=win32, win64=win64, macint64=macint64, $
+                lin32=lin32, lin64=lin64, grib=grib, $
+                sunx86_64=sunx86_64, sun64=sun64, $
+                hires_shapefiles=hires_shapefiles, video=video, $
+                useImageFile=useImageFile
+
+mustUseImageFile = (n_elements(useImageFile) eq 1) && isa(useImageFile, 'string')
+imageFile = strtrim(useImageFile[0],2)
+;check that imageFile is a valid image file for the app (must be a bmp, 480x313 pixels)
+if query_bmp(imageFile, struct) then begin
+   if strlen(file_basename(imageFile,'.bmp')) ne strlen(file_basename(imageFile)) then begin
+      ratio = struct.dimensions/[480.0,294.0]
+      if (ratio[0] lt 0.9) || (ratio[0] gt 1.1) || (ratio[1] lt 0.9) || (ratio[1] gt 1.1) then begin
+         ;issue warning, but continue
+         print, 'WARNING: Image file should be 480x294 pixels. Larger images will be cropped and smaller will leave empty areas'
+      endif
+   endif else begin
+      mustUseImageFile = 0b
+      print, 'File '+file_basename(imageFile,'.bmp')+' must be a bmp'
+   endelse
+endif else begin
+   mustUseImageFile = 0b
+   print, 'Could not find image file '+imageFile
+endelse
+
+make_rt, appname, outdir, $
+         idldir=idldir, logfile=logfile, manifest=manifest, $
+         overwrite=overwrite, savefile=savefile, $
+         vm=vm, embedded=embedded, dataminer=dataminer, $
+         dicomex=dicomex, hires_maps=hires_maps, $
+         win32=win32, win64=win64, macint64=macint64, $
+         lin32=lin32, lin64=lin64, grib=grib, $
+         sunx86_64=sunx86_64, sun64=sun64, $
+         hires_shapefiles=hires_shapefiles, video=video
+
+hasWin32 = (n_elements(win32) eq 1) ? win32 : 0b
+hasWin64 = (n_elements(win64) eq 1) ? win64 : 0b
+
+editIniFileForImage = mustUseImageFile
+editIniFileForWin   = hasWin32 && hasWin64
+mustEdit = editIniFileForImage || editIniFileForWin
+if mustEdit then begin
+   ps = path_sep()
+   fni = outDir+appname+ps+appname+'.ini'
+   fno = outDir+appname+ps+appname+'_tmp.ini'
+   if file_test(fni) then begin
+      nLines = file_lines(fni)
+      lines = strarr(nLines)
+      get_lun, iniUnit
+      openr, iniUnit, fni
+      readf, iniUnit, lines
+      close,    iniUnit
+      free_lun, iniUnit
+      
+      if editIniFileForImage then begin
+         lineNumber = (where(lines.contains('Picture'), cnt))[0]
+         if cnt eq 1 then begin
+            imgFilePath = file_dirname(imageFile, /mark_directory)
+            if imgFilePath ne (outDir+appname+ps) then file_copy, imageFile, outDir+appname+ps+file_basename(imageFile)
+            pictLine = lines[lineNumber]
+            subStr = strsplit(pictLine,'=',/extract)
+            subStr[1] = '.'+ps+file_basename(imageFile)
+            lines[lineNumber] = strjoin(subStr, '=')
+         endif
+      endif
+
+      if editIniFileForWin then begin
+         lineNumber = (where(lines.contains('DIALOG'), cnt))[0]
+         if cnt eq 1 then begin
+            lines[lineNumber+3] = 'Caption=IDL VM -> '+appname
+         endif
+         ;make two buttons for 32- and 64-bit versions
+         lineNumber = (where(lines.contains('BUTTON1'), cnt))[0]
+         subDir = file_dirname((strsplit((strsplit(lines[lineNumber+3],'=',/extract))[1],/extract))[0])
+         if cnt eq 1 then begin
+            lines[lineNumber+1] = 'Show=True'
+            lines[lineNumber+2] = 'Caption=32-bit'
+            lines[lineNumber+3] = 'Action='+subDir+ps+'idlrt.exe -vm='+file_basename(savefile)
+         endif
+         lineNumber = (where(lines.contains('BUTTON2'), cnt))[0]
+         if cnt eq 1 then begin
+            lines[lineNumber+1] = 'Show=True'
+            lines[lineNumber+2] = 'Caption=64-bit'
+            lines[lineNumber+3] = 'Action='+subDir+'_64'+ps+'idlrt.exe -vm='+file_basename(savefile)
+         endif
+         ;make an exit button
+         lineNumber = (where(lines.contains('BUTTON3'), cnt))[0]
+         if cnt eq 1 then begin
+            lines[lineNumber+1] = 'Show=True'
+            lines[lineNumber+2] = 'Caption=Exit'
+            lines[lineNumber+3] = 'Action=Exit'
+         endif
+      endif
+
+      get_lun, iniUnit
+      openw, iniUnit, fno
+      for i=0,n_elements(lines)-1 do printf, iniUnit, lines[i]
+      close,    iniUnit
+      free_lun, iniUnit
+      file_delete, fni
+      file_move, fno, fni
+   endif
+endif
+end
